@@ -28,7 +28,7 @@ namespace DCC
                 bool? validSignature = null;
                 foreach (var certificate in certificates)
                 {
-                    validSignature = cwt.CoseMessage.VerifySignature(certificate);
+                    validSignature = cwt.CoseMessage.VerifySignature_BouncyCastle(certificate);
                 }
                 if (!validSignature.HasValue)
                     return Tuple.Create(false, "KID public key not found");
