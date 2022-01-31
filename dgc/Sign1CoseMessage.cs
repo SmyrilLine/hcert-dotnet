@@ -1,6 +1,13 @@
-﻿using PeterO.Cbor;
+﻿using Org.BouncyCastle.Cms;
+using Org.BouncyCastle.Crypto;
+using Org.BouncyCastle.Crypto.Parameters;
+using Org.BouncyCastle.Security;
+using PeterO.Cbor;
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 
@@ -14,7 +21,9 @@ namespace DCC
         const int CoseHeader_Content = 2;
         const int CoseHeader_Signature = 3;
 
-        private const string ContextSignature1 = "Signature1";
+		private const int DerSequenceTag = 0x30;
+
+		private const string ContextSignature1 = "Signature1";
 
         static readonly CBORObject HeaderKey_Alg = CBORObject.FromObject(1);
         static readonly CBORObject Alg_ES256 = CBORObject.FromObject(-7);
@@ -175,5 +184,98 @@ namespace DCC
 
             throw new Exception("Public key algorithm not supported");   
         }
-    }
+
+		private static byte[] ConvertConcatToDer(byte[] concat)
+		{
+			int len = concat.Length / 2;
+
+			byte[] r = new byte[len];
+			Array.Copy(concat, 0, r, 0, len);
+			r = UnsignedInteger(r);
+
+			byte[] s = new byte[len];
+			Array.Copy(concat, len, s, 0, len);
+			s = UnsignedInteger(s);
+
+			var x = new List<byte[]>();
+			x.Add(new byte[] { DerSequenceTag });
+			x.Add(new byte[] { (byte)(r.Length + s.Length) });
+			x.Add(r);
+			x.Add(s);
+
+			var der = x.SelectMany(p => p).ToArray();
+			return der;
+		}
+
+		private static byte[] UnsignedInteger(byte[] i)
+		{
+			var offset = Array.FindIndex(i, elem => elem != 0);
+
+			if (offset == -1)
+			{
+				// Is 0
+				return new byte[] { 0x02, 0x01, 0x00 };
+			}
+
+			int pad = (i[offset] & 0x80) != 0 ? 1 : 0;
+
+			int length = i.Length - offset;
+			byte[] der = new byte[2 + length + pad];
+			der[0] = 0x02;
+			der[1] = (byte)(length + pad);
+			Array.Copy(i, offset, der, 2 + pad, length);
+
+			return der;
+		}
+
+		public bool VerifySignature_BouncyCastle(X509Certificate2 cert)
+		{
+			try
+			{
+				byte[] signature = Signature;
+
+				Org.BouncyCastle.X509.X509Certificate ConvertedCert = Org.BouncyCastle.Security.DotNetUtilities.FromX509Certificate(cert);
+				if (ConvertedCert == null)
+					return false;
+				
+				Org.BouncyCastle.Crypto.AsymmetricKeyParameter key = ConvertedCert.GetPublicKey();
+				if (key == null)
+					return false;
+
+				ISigner signer;
+				if (key is Org.BouncyCastle.Crypto.Parameters.ECKeyParameters)
+				{
+					signer = SignerUtilities.GetSigner("SHA-256withECDSA");
+					signature = ConvertConcatToDer(Signature);
+				}
+				else if (key is Org.BouncyCastle.Crypto.Parameters.RsaKeyParameters)
+				{
+					signer = SignerUtilities.GetSigner("SHA256withRSA/PSS");
+				}
+				else
+				{
+					throw new ArgumentException("Algorithm not supported");
+				}
+
+				signer.Init(false, key);
+
+				var cborArray = CBORObject.NewArray();
+				cborArray.Add(ContextSignature1);
+				cborArray.Add(ProtectedBytes);
+				cborArray.Add(new byte[0]); // no externaldata
+				cborArray.Add(Content);
+
+				var bytesToSign = cborArray.EncodeToBytes();
+				signer.BlockUpdate(bytesToSign, 0, bytesToSign.Length);
+
+				return signer.VerifySignature(signature);
+			}
+			catch (Exception ex)
+			{
+				Debug.WriteLine(ex);
+			}
+
+			return false;
+		}
+	}
 }
